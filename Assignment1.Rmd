@@ -1,0 +1,15 @@
+---
+title: "Assignment1_Xiaofeng_Li"
+output: html_document
+---
+# Loading library
+```{r}
+library(GEOquery)
+library(tidyverse)
+```
+
+# Loading Data
+```{r}
+gse <- getGEO("GSE67198", GSEMatrix = TRUE)
+gse <- gse$GSE67198_series_matrix.txt.gz
+```
