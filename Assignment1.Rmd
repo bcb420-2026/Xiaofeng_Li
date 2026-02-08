@@ -1,15 +1,257 @@
 ---
-title: "Assignment1_Xiaofeng_Li"
-output: html_document
+title: "Assignment 1 Data selection"
+author: "Xiaofeng Li"
+date: "2026-02-07"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true  
+    code_folding: hide
+bibliography: references.bib
+link-citations: true
 ---
-# Loading library
-```{r}
-library(GEOquery)
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  knitr.kable.max_rows = 6
+)
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+pkgs_bioc <- c("GEOmetadb", "GEOquery", "biomaRt")
+pkgs_cran <- c("DBI", "RSQLite", "tidyverse", "ggplot2")
+
+for (p in pkgs_bioc) {
+  if (!requireNamespace(p, quietly = TRUE))
+    BiocManager::install(p, ask = FALSE)
+}
+
+for (p in pkgs_cran) {
+  if (!requireNamespace(p, quietly = TRUE))
+    install.packages(p)
+}
 library(tidyverse)
+library(biomaRt)
+library(GEOmetadb)
+library(GEOquery)
+library(DBI)
+library(RSQLite)
+library(DESeq2)
+```
+
+# Finding Data
+
+```{r}
+sqlite_file <- getSQLiteFile()
+con <- dbConnect(SQLite(), sqlite_file)
+dbListTables(con)
+rna_seq_gpl <- dbGetQuery(con, "
+SELECT gpl
+FROM gpl
+WHERE technology LIKE '%high-throughput sequencing%'
+")
+human_rnaseq_gsm <- dbGetQuery(con, "
+SELECT gsm.gsm, gsm.gpl
+FROM gsm
+WHERE organism_ch1 = 'Homo sapiens'
+  AND gsm.gpl IN (
+        SELECT gpl
+        FROM gpl
+        WHERE technology LIKE '%high-throughput sequencing%'
+  )
+")
+human_rnaseq_gse <- dbGetQuery(con, "
+SELECT DISTINCT gse_gsm.gse
+FROM gse_gsm
+WHERE gse_gsm.gsm IN (
+    SELECT gsm
+    FROM gsm
+    WHERE organism_ch1 = 'Homo sapiens'
+      AND gpl IN (
+            SELECT gpl
+            FROM gpl
+            WHERE technology LIKE '%high-throughput sequencing%'
+      )
+)
+")
+
+diabetes_gse <- dbGetQuery(con, "
+SELECT gse.gse, gse.title, gse.summary, gse.overall_design
+FROM gse
+WHERE gse.gse IN (
+    SELECT DISTINCT gse
+    FROM gse_gsm
+    WHERE gsm IN (
+        SELECT gsm
+        FROM gsm
+        WHERE organism_ch1 = 'Homo sapiens'
+          AND gpl IN (
+                SELECT gpl
+                FROM gpl
+                WHERE technology LIKE '%high-throughput sequencing%'
+          )
+    )
+)
+AND (
+       gse.title LIKE '%diabetes%'
+    OR gse.summary LIKE '%diabetes%'
+    OR gse.overall_design LIKE '%diabetes%'
+)
+")
+gse_sample_counts <- dbGetQuery(con, "
+SELECT gse, COUNT(gsm) AS n_samples
+FROM gse_gsm
+GROUP BY gse
+HAVING n_samples >= 10
+")
+final_gse <- Reduce(
+    intersect,
+    list(
+        diabetes_gse$gse,
+        gse_sample_counts$gse
+    )
+)
+final_gse
+final_info <- dbGetQuery(
+    con,
+    paste0(
+        "SELECT gse, title, summary, overall_design
+         FROM gse
+         WHERE gse IN ('",
+        paste(final_gse, collapse = "','"),
+        "')"
+    )
+)
+
+final_info
 ```
 
 # Loading Data
+
 ```{r}
-gse <- getGEO("GSE67198", GSEMatrix = TRUE)
-gse <- gse$GSE67198_series_matrix.txt.gz
+gse <- getGEO(
+    "GSE104674",
+    GSEMatrix = TRUE,
+    getGPL = FALSE
+)
+eset <- gse[[1]]
+
+getGEOSuppFiles("GSE104674")
+counts <- read.table(
+  "./GSE104674/GSE104674_rawCounts.txt.gz",
+  header = TRUE,
+  row.names = 1,
+  sep = "\t",
+  check.names = FALSE
+)
+pheno$group <- ifelse(
+  grepl("Healthy", pheno$characteristics_ch1),
+  "control",
+  "expr"
+)
+pheno <- pheno %>%
+  mutate(
+    subject_id = str_extract(characteristics_ch1.1, "\\d+$"),
+    subject_id = str_pad(subject_id, width = 2, side = "left", pad = "0"),
+    timepoint  = str_extract(title, "D\\d+:\\d+"),
+    timepoint  = str_replace(timepoint, ":", "_"),
+    sample_name = paste0("Rhythm", subject_id, "_", timepoint)
+  )
+
+# set as rownames if needed
+rownames(pheno) <- pheno$sample_name
+
+# check
+pheno %>% select(group) %>% head()
+```
+
+# ID mapping
+
+### Raw counts format
+
+```{r}
+head(rownames(counts))
+```
+
+We can find the format of gene identifier is `gene_name:transcript_ID`. Thus, we need to merge all transcripts of one gene into a single count. \### Mapping
+
+```{r}
+head(rownames(counts))
+gene_symbol <- sub(":.*$", "", rownames(counts))
+counts_df <- data.frame(
+  gene_symbol = gene_symbol,
+  counts,
+  check.names = FALSE
+)
+counts_final <- counts_df %>%
+  group_by(gene_symbol) %>%
+  summarise(across(where(is.numeric), sum))
+counts_final <- as.data.frame(counts_final)
+rownames(counts_final) <- counts_final$gene_symbol
+counts_final$gene_symbol <- NULL
+```
+
+# Data Distribution
+
+```{r}
+plot_box <- function(mat, main = "", ylab = "log2(counts+1e-10)") {
+  df_long <- as.data.frame(mat) |>
+    rownames_to_column("gene") |>
+    pivot_longer(-gene, names_to = "sample", values_to = "value") |>
+    mutate(value = log2(value))
+
+  overall_mean <- mean(df_long$value, na.rm = TRUE)
+
+  ggplot(df_long, aes(x = sample, y = value)) +
+    geom_boxplot(
+      fill = "#4DBBD5",
+      color = "grey30",
+      outlier.size = 0.3,
+      alpha = 0.8
+    ) +
+    geom_hline(
+      yintercept = overall_mean,
+      color = "red",
+      linewidth = 0.6
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+    ) +
+    labs(title = main, x = "Sample", y = ylab)
+}
+plot_density <- function(mat, main = "") {
+  df <- as.data.frame(mat)
+  df_long <- df |>
+    mutate(gene = rownames(df)) |>
+    pivot_longer(-gene, names_to = "sample", values_to = "value") |>
+    mutate(value = log2(value + 1))
+
+  ggplot(df_long, aes(x = value, colour = sample)) +
+    geom_density() +
+    theme_bw() +
+    labs(title = main, x = "log2(counts+1)", y = "Density") +
+    guides(colour = "none")
+}
+
+plot_density(counts_final)
+plot_box(counts_final)
+```
+# Normalization
+```{r}
+# remove low expression gene
+keep <- rowSums(counts_final) >= 10
+counts_filt <- counts_final[keep, ]
+
+# Using DESeq size factors to normalize data
+dds <- DESeqDataSetFromMatrix(countData = counts_final, colData = pheno, ~ group)
+dds <- estimateSizeFactors(dds)
+dat <- counts(dds, normalized = TRUE)
+
+plot_box(dat)
 ```
