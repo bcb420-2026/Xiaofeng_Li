@@ -42,6 +42,11 @@ library(GEOquery)
 library(DBI)
 library(RSQLite)
 library(DESeq2)
+library(edgeR)
+library(DESeq2)
+library(limma)
+
+getGEOSuppFiles("GSE104674")
 ```
 
 # Finding Data
@@ -141,7 +146,6 @@ gse <- getGEO(
 )
 eset <- gse[[1]]
 
-getGEOSuppFiles("GSE104674")
 counts <- read.table(
   "./GSE104674/GSE104674_rawCounts.txt.gz",
   header = TRUE,
@@ -149,10 +153,14 @@ counts <- read.table(
   sep = "\t",
   check.names = FALSE
 )
-pheno$group <- ifelse(
-  grepl("Healthy", pheno$characteristics_ch1),
-  "control",
-  "expr"
+pheno <- pData(eset)
+pheno$group <- factor(
+  ifelse(
+    grepl("Healthy", pheno$characteristics_ch1),
+    "control",
+    "diabetes"
+  ),
+  levels = c("control", "diabetes")
 )
 pheno <- pheno %>%
   mutate(
@@ -162,12 +170,8 @@ pheno <- pheno %>%
     timepoint  = str_replace(timepoint, ":", "_"),
     sample_name = paste0("Rhythm", subject_id, "_", timepoint)
   )
-
-# set as rownames if needed
 rownames(pheno) <- pheno$sample_name
-
-# check
-pheno %>% select(group) %>% head()
+pheno <- dplyr::select(pheno, group)
 ```
 
 # ID mapping
@@ -196,62 +200,140 @@ rownames(counts_final) <- counts_final$gene_symbol
 counts_final$gene_symbol <- NULL
 ```
 
-# Data Distribution
+## Data distribution
+
+### Density plot（log2 counts）
 
 ```{r}
-plot_box <- function(mat, main = "", ylab = "log2(counts+1e-10)") {
+counts_final <- as.matrix(counts_final)
+log_counts <- log2(counts_final + 1)
+plotDensities(log_counts, legend = FALSE, main ="log2 density plot")
+```
+
+### Boxplot
+
+```{r}
+plot_box <- function(mat, pheno, main = "", ylab = "log2(counts+1)") {
   df_long <- as.data.frame(mat) |>
     rownames_to_column("gene") |>
     pivot_longer(-gene, names_to = "sample", values_to = "value") |>
-    mutate(value = log2(value))
+    left_join(pheno |> rownames_to_column("sample"), by = "sample") |>
+    mutate(value = log2(value + 1))
 
   overall_mean <- mean(df_long$value, na.rm = TRUE)
 
-  ggplot(df_long, aes(x = sample, y = value)) +
+  ggplot(df_long, aes(x = sample, y = value, fill = group)) +
+    geom_boxplot(outlier.size = 0.3, alpha = 0.8) +
+    geom_hline(yintercept = overall_mean, color = "red", linewidth = 0.6) +
+    scale_fill_manual(values = c(control = "#1F3A8A", diabetes = "#F59E0B")) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+    labs(title = main, x = "Sample", y = ylab)
+}
+
+p_raw <- plot_box(counts_final, pheno, main = "Raw counts")
+p_raw
+```
+
+## TMM normalization（edgeR）
+
+```{r}
+dge <- DGEList(counts = counts_final, group = pheno$group)
+dge <- calcNormFactors(dge, method = "TMM")
+
+logCPM <- cpm(dge, log = TRUE, prior.count = 1)
+```
+
+## MDS plot
+
+```{r}
+plotMDS(
+  logCPM,
+  col = col_group,
+  labels = NULL
+)
+
+legend(
+  "topright",
+  legend = levels(pheno$group),
+  col = c("#1F3A8A", "#F59E0B"),
+  pch = 16
+)
+```
+
+## Comparsion
+
+```{r}
+plot_box_overlay <- function(raw_mat, norm_mat,
+                             ylab = "log2(counts+1)") {
+
+  df_raw <- as.data.frame(raw_mat) |>
+    rownames_to_column("gene") |>
+    pivot_longer(-gene, names_to = "sample", values_to = "value") |>
+    mutate(
+      value = log2(value + 1),
+      type = "Raw"
+    )
+
+  df_norm <- as.data.frame(norm_mat) |>
+    rownames_to_column("gene") |>
+    pivot_longer(-gene, names_to = "sample", values_to = "value") |>
+    mutate(
+      value = log2(value + 1),
+      type = "TMM"
+    )
+
+  df_long <- bind_rows(df_raw, df_norm)
+
+  ggplot(df_long, aes(x = sample, y = value, fill = type)) +
     geom_boxplot(
-      fill = "#4DBBD5",
-      color = "grey30",
-      outlier.size = 0.3,
-      alpha = 0.8
+      position = "identity",
+      alpha = 0.4,
+      outlier.size = 0.3
     ) +
-    geom_hline(
-      yintercept = overall_mean,
-      color = "red",
-      linewidth = 0.6
+    scale_fill_manual(
+      values = c(Raw = "blue", TMM = "red")
     ) +
     theme_bw() +
     theme(
-      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+      axis.text.x = element_text(angle = 90, hjust = 1)
     ) +
-    labs(title = main, x = "Sample", y = ylab)
+    labs(x = "Sample", y = ylab, fill = "")
 }
-plot_density <- function(mat, main = "") {
-  df <- as.data.frame(mat)
-  df_long <- df |>
-    mutate(gene = rownames(df)) |>
-    pivot_longer(-gene, names_to = "sample", values_to = "value") |>
-    mutate(value = log2(value + 1))
-
-  ggplot(df_long, aes(x = value, colour = sample)) +
-    geom_density() +
-    theme_bw() +
-    labs(title = main, x = "log2(counts+1)", y = "Density") +
-    guides(colour = "none")
-}
-
-plot_density(counts_final)
-plot_box(counts_final)
+plot_box_overlay(counts_final, 2^logCPM)
 ```
-# Normalization
-```{r}
-# remove low expression gene
-keep <- rowSums(counts_final) >= 10
-counts_filt <- counts_final[keep, ]
 
-# Using DESeq size factors to normalize data
-dds <- DESeqDataSetFromMatrix(countData = counts_final, colData = pheno, ~ group)
-dds <- estimateSizeFactors(dds)
-dat <- counts(dds, normalized = TRUE)
+## DESeq2
 
-plot_box(dat)
+```{r, message=FALSE}
+keep <- rowSums(counts_final >= 10) >= 3
+counts_final <- counts_final[keep, ]
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_final,
+  colData = pheno,
+  design = ~ group
+)
+
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("group", "diabetes", "control"))
+res_df <- as.data.frame(res) |> rownames_to_column("gene")
+```
+
+## Volcano Plot
+
+```{r volcano}
+res_df <- res_df |>
+  mutate(sig = case_when(
+    padj < 0.05 & log2FoldChange > 1  ~ "Up",
+    padj < 0.05 & log2FoldChange < -1 ~ "Down",
+    TRUE ~ "NS"
+  ))
+
+ggplot(res_df, aes(x = log2FoldChange, y = -log10(padj), color = sig)) +
+  geom_point(size = 1.2, alpha = 0.8) +
+  scale_color_manual(values = c(Up = "red", Down = "blue", NS = "grey")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  theme_bw() +
+  labs(title = "Volcano plot", x = "log2 Fold Change", y = "p-value(-log10)")
 ```
