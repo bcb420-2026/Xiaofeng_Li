@@ -7,14 +7,13 @@ output:
     toc: true
     toc_depth: 2
     toc_float: true  
-    code_folding: hide
 bibliography: references.bib
 link-citations: true
 ---
 
 ```{r setup, include=FALSE, echo=FALSE}
 knitr::opts_chunk$set(
-  echo    = FALSE,
+  echo    = TRUE,
   warning = FALSE,
   message = FALSE,
   knitr.kable.max_rows = 6
@@ -49,96 +48,9 @@ library(limma)
 getGEOSuppFiles("GSE104674")
 ```
 
-# Finding Data
-
-```{r}
-sqlite_file <- getSQLiteFile()
-con <- dbConnect(SQLite(), sqlite_file)
-dbListTables(con)
-rna_seq_gpl <- dbGetQuery(con, "
-SELECT gpl
-FROM gpl
-WHERE technology LIKE '%high-throughput sequencing%'
-")
-human_rnaseq_gsm <- dbGetQuery(con, "
-SELECT gsm.gsm, gsm.gpl
-FROM gsm
-WHERE organism_ch1 = 'Homo sapiens'
-  AND gsm.gpl IN (
-        SELECT gpl
-        FROM gpl
-        WHERE technology LIKE '%high-throughput sequencing%'
-  )
-")
-human_rnaseq_gse <- dbGetQuery(con, "
-SELECT DISTINCT gse_gsm.gse
-FROM gse_gsm
-WHERE gse_gsm.gsm IN (
-    SELECT gsm
-    FROM gsm
-    WHERE organism_ch1 = 'Homo sapiens'
-      AND gpl IN (
-            SELECT gpl
-            FROM gpl
-            WHERE technology LIKE '%high-throughput sequencing%'
-      )
-)
-")
-
-diabetes_gse <- dbGetQuery(con, "
-SELECT gse.gse, gse.title, gse.summary, gse.overall_design
-FROM gse
-WHERE gse.gse IN (
-    SELECT DISTINCT gse
-    FROM gse_gsm
-    WHERE gsm IN (
-        SELECT gsm
-        FROM gsm
-        WHERE organism_ch1 = 'Homo sapiens'
-          AND gpl IN (
-                SELECT gpl
-                FROM gpl
-                WHERE technology LIKE '%high-throughput sequencing%'
-          )
-    )
-)
-AND (
-       gse.title LIKE '%diabetes%'
-    OR gse.summary LIKE '%diabetes%'
-    OR gse.overall_design LIKE '%diabetes%'
-)
-")
-gse_sample_counts <- dbGetQuery(con, "
-SELECT gse, COUNT(gsm) AS n_samples
-FROM gse_gsm
-GROUP BY gse
-HAVING n_samples >= 10
-")
-final_gse <- Reduce(
-    intersect,
-    list(
-        diabetes_gse$gse,
-        gse_sample_counts$gse
-    )
-)
-final_gse
-final_info <- dbGetQuery(
-    con,
-    paste0(
-        "SELECT gse, title, summary, overall_design
-         FROM gse
-         WHERE gse IN ('",
-        paste(final_gse, collapse = "','"),
-        "')"
-    )
-)
-
-final_info
-```
-
 # Loading Data
-
-```{r}
+This dataset was obtained from the Gene Expression Omnibus (GEO) under accession GSE104674 [@GSE104674].
+```{r define-groups}
 gse <- getGEO(
     "GSE104674",
     GSEMatrix = TRUE,
@@ -182,10 +94,11 @@ pheno <- dplyr::select(pheno, group)
 head(rownames(counts))
 ```
 
-We can find the format of gene identifier is `gene_name:transcript_ID`. Thus, we need to merge all transcripts of one gene into a single count. \### Mapping
+### Mapping
 
-```{r}
-head(rownames(counts))
+We can find the format of gene identifier is `gene_name:transcript_ID`. Thus, we need to merge all transcripts of one gene into a single count.
+
+```{r process_data}
 gene_symbol <- sub(":.*$", "", rownames(counts))
 counts_df <- data.frame(
   gene_symbol = gene_symbol,
@@ -200,19 +113,33 @@ rownames(counts_final) <- counts_final$gene_symbol
 counts_final$gene_symbol <- NULL
 ```
 
-## Data distribution
+### Data Clean
+For differential expression analyze, lowly expressed genes were filtered using the edgeR framework [@Robinson2010] associated with a designed matrix.
+```{r data_clean}
+dge <- DGEList(counts = counts_final)
+dim(dge)
+design <- model.matrix(~ 0 + group, data = pheno)
+keep <- filterByExpr(dge, design)
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+dim(dge)
+counts_final <- dge$counts
+```
+
+# Data distribution
 
 ### Density plot（log2 counts）
 
-```{r}
-counts_final <- as.matrix(counts_final)
-log_counts <- log2(counts_final + 1)
+```{r density_before}
+des <- as.matrix(counts_final)
+log_counts <- log2(des + 1)
 plotDensities(log_counts, legend = FALSE, main ="log2 density plot")
 ```
 
+**Figure 1. Log2 transformed gene expression intensity density distribution plot.** This plot shows the overall expression level distribution of each sample. Different colored curves represent different samples, and their distribution shapes are highly similar, indicating that the overall expression distribution among samples is consistent.
+
 ### Boxplot
 
-```{r}
+```{r boxplot_before}
 plot_box <- function(mat, pheno, main = "", ylab = "log2(counts+1)") {
   df_long <- as.data.frame(mat) |>
     rownames_to_column("gene") |>
@@ -235,21 +162,26 @@ p_raw <- plot_box(counts_final, pheno, main = "Raw counts")
 p_raw
 ```
 
-## TMM normalization（edgeR）
+**Figure 2. Box plot of raw RNA-seq counts transformed to log2(counts + 1)**. This plot shows the overall expression distribution across samples. Blue represents the control group, orange represents the type 2 diabetes group, and the red line represents the overall median level for all samples. It can be seen that there are no significant differences in counts among samples, only minor oscillations, and no obvious outliers.
+
+# Normalization
+
+### TMM normalization（edgeR）
+
+Given that the differences between samples are not significant and there are no extreme samples, and based on the objective of differential expression analysis, I will use TMM for normalization.
 
 ```{r}
-dge <- DGEList(counts = counts_final, group = pheno$group)
 dge <- calcNormFactors(dge, method = "TMM")
-
+counts_final <- dge$counts
 logCPM <- cpm(dge, log = TRUE, prior.count = 1)
 ```
 
-## MDS plot
+### MDS plot
 
 ```{r}
 plotMDS(
   logCPM,
-  col = col_group,
+  col = c("#1F3A8A", "#F59E0B"),
   labels = NULL
 )
 
@@ -261,7 +193,9 @@ legend(
 )
 ```
 
-## Comparsion
+**Figure 3. MDS plot based on TMM-normalized expression data**. This figure shows the relative relationships of samples in the first two dominant logFC dimensions. Blue dots represent the healthy control group, and orange dots represent the type 2 diabetes group; the samples are partially separated in the low-dimensional space.
+
+### Comparsion
 
 ```{r}
 plot_box_overlay <- function(raw_mat, norm_mat,
@@ -303,11 +237,22 @@ plot_box_overlay <- function(raw_mat, norm_mat,
 plot_box_overlay(counts_final, 2^logCPM)
 ```
 
-## DESeq2
+**Figure 4. Box plot comparison of raw counts and TMM-normalized expression values under log2(counts + 1) transformation.** The blue box represents the expression distribution before normalization, and the red box represents the expression distribution after TMM normalization. The expression distribution of different samples is more aligned after normalization.
+
+### Final Data
+
+```{r}
+dim(counts_final)
+head(counts_final[1:6,1:4])
+```
+
+# Differential Gene Expression
+
+### DESeq2
+
+I will use DESeq2, which is based on a negative binomial distribution model [@Love2014]. For the accuracy of the p-value, I filtered out all genes with expression levels greater than or equal to 10 in fewer than 3 samples. This is because their expression levels are too low, making complete segregation likely and resulting in a Na p-value. Even if they were retained, the reliability of the calculated p-value would be low, so I removed them here.
 
 ```{r, message=FALSE}
-keep <- rowSums(counts_final >= 10) >= 3
-counts_final <- counts_final[keep, ]
 dds <- DESeqDataSetFromMatrix(
   countData = counts_final,
   colData = pheno,
@@ -319,7 +264,7 @@ res <- results(dds, contrast = c("group", "diabetes", "control"))
 res_df <- as.data.frame(res) |> rownames_to_column("gene")
 ```
 
-## Volcano Plot
+### Volcano Plot
 
 ```{r volcano}
 res_df <- res_df |>
@@ -337,3 +282,35 @@ ggplot(res_df, aes(x = log2FoldChange, y = -log10(padj), color = sig)) +
   theme_bw() +
   labs(title = "Volcano plot", x = "log2 Fold Change", y = "p-value(-log10)")
 ```
+
+**Figure 5. Volcano plot of DESeq2 results.** The volcano plot shows the distribution of differentially expressed genes between the control group and the type 2 diabetes group. The horizontal axis represents log2 Fold Change, the vertical axis represents −log10 (p-value), and the dashed lines represent significance and fold change thresholds. Red dots represent significantly upregulated genes, blue dots represent significantly downregulated genes, and gray dots represent insignificant genes.
+
+# Interpret
+
+### What are the control and test conditions of the dataset?   
+In this data set, the control group consisted of healthy, lean individuals, while the experimental group consisted of obese patients with type 2 diabetes. The samples were all collected from subcutaneous adipose tissue under controlled food intake and fixed Zeitgeber Time conditions. The control and test conditions were defined in the phenotype processing step (see [group definition](#define-groups)).  
+
+### Why is the dataset of interest to you?
+
+Firstly, I am very interested in the research topic of this dataset. Obesity and diabetes are mutually influential, and this dataset collects adipose tissue from diabetic patients for study. [@Stenvers2019] My research could focus on whether gene expression affects the development of diabetes, or whether certain genes are suppressed in the adipose tissue of diabetic patients. Secondly, the data quality is very high. This is high-throughput RNA-seq data, and the supplementary data contains raw counts, making it very suitable for differential expression analysis. It contains 48 samples from 12 individuals at different time points, ensuring sufficient sample size and reproducibility, which greatly improves the accuracy of the data. My normalization (see [boxplot](#boxplot_before)) and (see [density plot](#density_before)) show no extreme data points, and the data is even more stable after TMM regularization, indicating high reliability.
+
+
+### Were there expression values that were not unique for specific genes? How did you handle these?
+
+In this dataset, genes are calculated separately for each transcript, meaning the same gene may exist in multiple transcripts, resulting in duplicates in the raw counts.(see [process data](#process_data)) Since my focus here is on gene-level analysis, I combined different transcripts for the same gene for calculation. If further transcript-level analysis is needed in subsequent analyses, I have also retained the raw counts data frame for use.
+
+
+### Were there expression values that could not be mapped to current HUGO symbols?
+
+The raw counts data already have HUGO symbols as its row name. But it includes the transcript information in the name. Thus, I retrieve the HUGO symbols by using regex and reset the row name to well formated HUGO symbols by (see [code](#process_data)).
+
+### How many outliers were removed?
+Outliers were not removed at the sample level. As I mentioned, the sample distribution was clearly checked using density plots and boxplots, and the captions indicate that no obvious outliers were found, therefore no sample removal was performed. However, due to the extremely low total expression of some genes, if the test or control showed expression levels of 0, it would lead to complete segregation, resulting in a Na p-value in the final DESeq2 analysis. This is normal because some genes are inherently low in expression. However, because differential expression analysis is required, even without removing these genes, the extremely low expression amplifies the impact of full fractional expression (FC). Small sequencing variances can significantly affect the p-value. Therefore, an edge filter combined with a design matrix was used to remove genes that lack expression support under any condition. 11529 genes are removed by (see [code](#data_clean)).
+
+### How did you handle replicates?
+For each individual, the dataset contains four samples taken at different times. These are multiple independent samples, not technical replicates, so instead of averaging or merging replicates, I treated each sample as an independent observation and directly incorporated it into the statistical model. This approach effectively assigns equivalent weights to different times of day, avoiding variance caused by different sampling times (e.g., control samples taken entirely before meals while test samples taken entirely after meals). Furthermore, the time information can be used in subsequent studies as a grouping criterion to investigate differences in gene expression among diabetic patients at different times. In the (see [code](#define-groups)), I extracted the individual identifier and sampling time from the pheno data and set them as the row name of the sample to keep them consistent with the counts.
+
+### What is the final coverage of your dataset?
+The raw data is a 23099 x 48 matrix. After data cleaning, the remain dataset is a 11570 x 48 matrix. No sample was dropped and 11529 genes were dropped by edge filter function. The final coverage is 50%.  
+
+# References
