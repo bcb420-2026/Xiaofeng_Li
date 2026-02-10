@@ -1652,8 +1652,8 @@ counts_final &lt;- as.data.frame(counts_final)
 rownames(counts_final) &lt;- counts_final$gene_symbol
 counts_final$gene_symbol &lt;- NULL</code></pre>
 </div>
-<div id="confirm-hugo-symbol-hugo." class="section level3">
-<h3>Confirm HUGO symbol {$hugo}.</h3>
+<div id="hugo" class="section level3">
+<h3>Confirm HUGO symbol</h3>
 <p>After re-formate the row name, I used biomaRt to check if these names
 are all official HUGO symbols <span class="citation">(<a href="#ref-Durinck2009">Durinck et al. 2009</a>)</span>. 2385 un-mapped
 genes founded by this step.</p>
@@ -1671,8 +1671,8 @@ not_found &lt;- setdiff(gene_symbols, valid_symbols)
 length(not_found)</code></pre>
 <pre><code>## [1] 2385</code></pre>
 </div>
-<div id="mapping-alias-alias." class="section level3">
-<h3>Mapping Alias {#alias}.</h3>
+<div id="alias" class="section level3">
+<h3>Mapping Alias</h3>
 <p>To solve that I mapped these gene as alias name using biomaRt and
 tring to match the official name <span class="citation">(<a href="#ref-Durinck2009">Durinck et al. 2009</a>)</span>.</p>
 <pre class="r"><code>alias_map &lt;- getBM(

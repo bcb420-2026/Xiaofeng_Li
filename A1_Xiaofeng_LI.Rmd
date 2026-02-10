@@ -169,7 +169,7 @@ rownames(counts_final) <- counts_final$gene_symbol
 counts_final$gene_symbol <- NULL
 ```
 
-### Confirm HUGO symbol {$hugo}. 
+### Confirm HUGO symbol {#hugo}  
 After re-formate the row name, I used biomaRt to check if these names are all official HUGO symbols [@Durinck2009]. 2385 un-mapped genes founded by this step.  
 
 ```{r}
@@ -187,7 +187,7 @@ not_found <- setdiff(gene_symbols, valid_symbols)
 length(not_found)
 ```
 
-### Mapping Alias {#alias}. 
+### Mapping Alias {#alias}  
 To solve that I mapped these gene as alias name using biomaRt and tring to match the official name [@Durinck2009].  
 
 ```{r}
