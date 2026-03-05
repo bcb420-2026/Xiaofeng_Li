@@ -1,0 +1,99 @@
+---
+title: "GSEA"
+output: html_document
+params:
+  analysis_name: GSEA_tes
+  working_dir: /home/rstudio/projects/Xiaofeng_Li/in_class_exercises/GSEA
+  output_dir: /home/rstudio/projects/Xiaofeng_Li/in_class_exercises/GSEA/output
+  rnk_file: MesenvsImmuno_RNASeq_ranks.rnk
+  classes_file: classes.cls
+  expression_file: expression.txt
+  run_gsea: yes
+  gsea_jar: /home/rstudio/GSEA_4.4.0/gsea-cli.sh
+  gsea_directory: ''
+  fdr_thresh: 0.01
+  pval_thresh: 1
+  java_version: 11
+  
+---
+
+```{r}
+tryCatch(expr = { library("RCurl")}, 
+         error = function(e) {  
+           install.packages("RCurl")}, 
+         finally = library("RCurl"))
+
+# GSEA jar
+gsea_jar <- params$gsea_jar
+
+# defined in the paramters at top of notebook
+
+#directory where all the data files are found.  For example -   ./data/ 
+working_dir <- params$working_dir
+
+#directory where all the data files are found.  For example -   ./generated_data/gsea/
+output_dir <- params$output_dir
+
+#The name to give the analysis in GSEA - for example Basal_vs_Classical
+analysis_name <- params$analysis_name
+
+#rank file to use in GSEA analysis.  
+#For example - TCGA-PAAD_GDC_Subtype_Moffitt_BasalvsClassical_ranks.rnk
+rnk_file <- params$rnk_file
+
+#run_gsea - true/false
+# This parameter is for the compilation of the notebook.  
+run_gsea <- params$run_gsea
+
+#set the gmt file you want to use if you don't want to use the latest gmt file.
+# For example, if you set dest_gmt_file =="" the below script will automatically
+# download the latest gmt file from baderlab webstie.  If it is set then it
+# will use the file specified.  
+dest_gmt_file = ""
+```
+
+```{r}
+
+if(dest_gmt_file == ""){
+  gmt_url = "https://download.baderlab.org/EM_Genesets/September_01_2025/Human/symbol/"
+  
+  #list all the files on the server
+  filenames = getURL(gmt_url)
+  tc = textConnection(filenames)
+  contents = readLines(tc)
+  close(tc)
+  
+  #get the gmt that has all the pathways and does not include terms 
+  # inferred from electronic annotations(IEA)
+  #start with gmt file that has pathways only and GO Biological Process only.
+  rx = gregexpr("(?<=<a href=\")(.*.GOBP_AllPathways_noPFOCR_no_GO_iea.*.)(.gmt)(?=\">)",
+    contents, perl = TRUE)
+  gmt_file = unlist(regmatches(contents, rx))
+  
+  dest_gmt_file <- file.path(output_dir,gmt_file )
+  
+  #check if this gmt file already exists
+  if(!file.exists(dest_gmt_file)){
+    download.file(
+      paste(gmt_url,gmt_file,sep=""),
+      destfile=dest_gmt_file
+    )
+  }
+}
+```
+
+```{r}
+
+if(run_gsea) {
+  command <- paste("", "~/GSEA_4.4.0/gsea-cli.sh",
+                   "GSEAPreRanked -gmx", dest_gmt_file,
+                   "-rnk", file.path(working_dir, rnk_file),
+                   "-collapse false -nperm 1000 -scoring_scheme weighted",
+                   "-rpt_label ", analysis_name,
+                   "-plot_top_x 20 -rnd_seed 12345 -set_max 200",
+                   "-set_min 15 -zip_report false",
+                   "-out ", output_dir,
+                   " > gsea_output.txt", sep = " ")
+  system(command)
+}
+```
