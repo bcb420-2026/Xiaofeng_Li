@@ -1,0 +1,485 @@
+---
+title: "BCB420 Assignment 2: Differential Expression and Enrichment Analysis"
+author: "Xiaofeng Li"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    theme: cosmo
+params:
+  analysis_name: A2
+  working_dir: /home/rstudio/projects/Xiaofeng_Li/A2
+  output_dir: /home/rstudio/projects/Xiaofeng_Li/A2/output
+  rnk_file: ControlvsDiabete.rnk
+  run_gsea: yes
+  gsea_jar: /home/rstudio/GSEA_4.4.0/gsea-cli.sh
+  gsea_directory: ''
+  fdr_thresh: 0.01
+  pval_thresh: 1
+  java_version: 11
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(DESeq2)
+library(tidyverse)
+library(pheatmap)
+library(ggplot2)
+library(gprofiler2)
+library(knitr)
+library(kableExtra)
+library(RCurl)
+```
+
+# Introduction
+
+The dataset analyzed in this report was obtained from the Gene Expression Omnibus (GEO) under accession GSE104674. The study contains RNA sequencing data from subcutaneous adipose tissue samples collected from individuals with type 2 diabetes and healthy controls.
+
+In Assignment 1, raw count data were processed and normalized using the DESeq2 size factor normalization method. Gene identifiers were standardized and low expression genes were filtered. Exploratory analysis including density plots, boxplots, and MDS plots suggested that normalization corrected library size differences and revealed partial separation between the diabetes and control groups.
+
+This assignment focuses on identifying differentially expressed genes and performing functional enrichment analysis to identify biological processes associated with the observed transcriptional changes.
+```{r}
+load("A1_objects.RData")
+```
+
+# Differential Gene Expression
+
+## Model Design
+
+Differential expression analysis was conducted using the DESeq2 framework.
+
+```{r}
+design(dds)
+```
+
+The model tests whether gene expression differs between the diabetes and control groups.
+
+## Differential Expression Testing
+
+```{r}
+res <- results(dds)
+
+res_df <- as.data.frame(res) |>
+  rownames_to_column("gene") |>
+  drop_na(padj)
+```
+
+Genes were considered significantly differentially expressed using the following thresholds:
+
+* adjusted p-value < 0.01
+* absolute log2 fold change > 1
+
+Adjusted p-values were calculated using the Benjamini–Hochberg false discovery rate correction.
+
+```{r}
+res_df <- res_df |>
+  mutate(
+    sig = case_when(
+      padj < 0.01 & log2FoldChange > 1 ~ "Up",
+      padj < 0.01 & log2FoldChange < -1 ~ "Down",
+      TRUE ~ "NS"
+    )
+  )
+
+table(res_df$sig)
+```
+
+# Visualization
+
+## Volcano Plot
+
+```{r}
+ggplot(res_df, aes(log2FoldChange, -log10(padj), color = sig)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values=c("blue","grey","red")) +
+  theme_minimal() +
+  labs(
+    title="Volcano Plot of Differential Expression",
+    x="log2 Fold Change",
+    y="-log10 adjusted p-value"
+  )
+```  
+
+**Figure 1**. Volcano plot of differentially expressed genes. This plot shows the expression changes of all genes obtained based on DESeq2 differential expression analysis. The horizontal axis is log2 Fold Change, representing the fold change in expression between the diabetes group and the control group; the vertical axis is −log10 (adjusted p-value), representing the significance of the difference. Each point represents a gene. Based on the threshold condition (adjusted p-value < 0.01 and |log2FoldChange| > 1), genes are divided into upregulated (red), downregulated (blue), and insignificant (gray). The volcano plot can visually display the distribution of differentially expressed genes in terms of statistical significance and expression change magnitude, and help identify candidate genes with large and significant changes.
+
+
+## MA Plot
+
+```{r}
+ma_df <- as.data.frame(res)
+
+ggplot(ma_df, aes(baseMean, log2FoldChange)) +
+  geom_point(alpha=0.4, size=0.7) +
+  scale_x_log10() +
+  geom_hline(yintercept=0, color="red") +
+  theme_minimal() +
+  labs(
+    x="Mean expression (log scale)",
+    y="log2 fold change",
+    title="MA Plot"
+  )
+```  
+
+**Figure 2**. Differential expression analysis MA plot. This plot illustrates the relationship between average gene expression and expression change. The horizontal axis represents the mean expression (log scale) of genes across all samples, and the vertical axis represents log2 fold change. Each point represents a gene. The red horizontal line indicates a position where log2 fold change = 0, meaning there is no difference in expression between the two groups. This plot can be used to assess the overall stability of differential expression analysis and the impact of expression level on fold change. Most genes are concentrated in the region where log2 fold change is close to 0, indicating that most genes show little difference in expression between the two groups, while only a few genes show significant upregulation or downregulation.
+
+
+## Heatmap of Top Differentially Expressed Genes
+
+```{r}
+deg_genes <- res_df |>
+  filter(sig != "NS") |>
+  pull(gene)
+
+heatmap_mat <- norm_counts[deg_genes, ]
+
+heatmap_mat_scaled <- t(scale(t(heatmap_mat)))
+annotation_col <- data.frame(
+  group = colData(dds)$group
+)
+
+rownames(annotation_col) <- colnames(norm_counts)
+breaks <- seq(-3, 3, length.out = 101)
+
+pheatmap(
+  heatmap_mat_scaled,
+  show_rownames = FALSE,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  annotation_col = annotation_col,
+  gaps_col = sum(annotation_col$group == "control"),
+  border_color = NA,
+  color = colorRampPalette(c("blue","white","red"))(100),
+  breaks = breaks,
+  main = "Heatmap of Differentially Expressed Genes"
+)
+```  
+
+**Figure 3**. Heatmap of differentially expressed genes. This figure shows the expression patterns of significantly differentially expressed genes identified in the differential expression analysis across all samples. Rows represent genes, and columns represent samples. Expression values ​​were standardized (row scaling) before plotting to highlight differences in expression patterns between samples. Colors from blue to red represent low and high expression levels, respectively. The annotation bar at the top indicates the group to which the sample belongs (control vs. diabetes). Hierarchical clustering reveals that some genes are generally upregulated in diabetes samples and expressed at lower levels in control samples, and vice versa, suggesting that these genes may be involved in disease-related biological processes.
+
+
+# Thresholded Over-Representation Analysis
+
+## Ranking
+```{r}
+ranked_genes <- res_df |>
+  arrange(desc(log2FoldChange))
+gene_rank_vector <- ranked_genes$log2FoldChange
+names(gene_rank_vector) <- ranked_genes$gene
+ggplot(ranked_genes, aes(log2FoldChange)) +
+  geom_histogram(bins=100, fill="steelblue", color="black") +
+  theme_minimal() +
+  labs(
+    title="Distribution of Differential Expression",
+    x="log2 Fold Change",
+    y="Gene Count"
+  )
+```  
+
+**Figure 4**. Distribution of ranked differential expression. This figure shows the distribution of log2 Fold Change for all genes. The horizontal axis represents log2 Fold Change, and the vertical axis represents the number of genes. This distribution is used to observe the overall trend of differential expression changes and serves as the basis for constructing the gene ranking list in GSEA analysis. It can be seen that the expression changes of most genes are concentrated around 0, indicating relatively small overall expression changes, while only a few genes show large expression changes.  
+
+## G:profiler  
+### Run Analysis
+We have obtained three gene sets based on the DESeq2 results: upregulated genes, downregulated genes, and all differentially expressed genes. Next, we will use g:Profiler to perform over-representation analysis on these gene sets to identify significantly enriched biological processes and pathways. First, we will perform enrichment analysis on upregulated and downregulated genes separately. g:Profiler will calculate significance based on the frequency of the input gene set in each functional category using a hypergeometric test and perform multiple validation correction.  
+```{r}
+res_df <- res_df |>
+  mutate(
+    sig = case_when(
+      padj < 0.01 & log2FoldChange > 1 ~ "Up",
+      padj < 0.01 & log2FoldChange < -1 ~ "Down",
+      TRUE ~ "NS"
+    )
+  )
+# extract gene lists for enrichment analysis
+up_genes <- res_df |>
+  filter(sig == "Up") |>
+  pull(gene)
+
+down_genes <- res_df |>
+  filter(sig == "Down") |>
+  pull(gene)
+
+all_genes <- res_df |>
+  filter(sig != "NS") |>
+  pull(gene)
+
+gost_up <- gost(
+  query = up_genes,
+  organism = "hsapiens",
+  correction_method = "fdr"
+)
+
+gost_down <- gost(
+  query = down_genes,
+  organism = "hsapiens",
+  correction_method = "fdr"
+)
+
+gost_all <- gost(
+  query = all_genes,
+  organism = "hsapiens",
+  correction_method = "fdr"
+)
+```  
+
+### Results
+From the G:profiler results, we used a corrected FDR of less than 0.05 as a threshold to filter statistically significant functional categories. We then examined how many significantly enriched functional categories were returned in each analysis.
+
+```{r}
+# Extract result tables 
+res_up <- gost_up$result
+res_down <- gost_down$result
+res_all <- gost_all$result
+
+# Filter significant enriched terms
+sig_up <- res_up |> filter(p_value < 0.05)
+sig_down <- res_down |> filter(p_value < 0.05)
+sig_all <- res_all |> filter(p_value < 0.05)
+up_df <- gost_up$result |> mutate(direction = "Up")
+down_df <- gost_down$result |> mutate(direction = "Down")
+
+combined_df <- bind_rows(up_df, down_df)
+table_df <- combined_df |>
+  mutate(logFDR = -log10(p_value)) |>
+  filter(p_value < 0.05) |>
+  arrange(p_value) |>
+  dplyr::select(
+    Database = source,
+    Term = term_name,
+    log10FDR = logFDR,
+    GeneCount = intersection_size,
+    Direction = direction
+  ) |>
+  slice(1:30)
+
+knitr::kable(table_df, digits = 3) |>
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover")
+  )
+```
+ 
+### Manhattan Plot 
+G:profiler includes a Manhattan plot. The Manhattan plot allows us to see details of gene enrichment in significant functional categories.  
+
+```{r}
+up_df <- gost_up$result |> mutate(direction = "Up")
+down_df <- gost_down$result |> mutate(direction = "Down")
+combined_df <- bind_rows(up_df, down_df)
+
+combined_df <- combined_df |>
+  mutate(
+    logFDR = -log10(p_value),
+    category = case_when(
+      p_value < 0.05 & direction == "Up" ~ "Up",
+      p_value < 0.05 & direction == "Down" ~ "Down",
+      TRUE ~ "Not significant"
+    ),
+    source = factor(source)
+  )
+
+bg_df <- combined_df |>
+  distinct(source) |>
+  arrange(source) |>
+  mutate(
+    xmin = as.numeric(source) - 0.5,
+    xmax = as.numeric(source) + 0.5,
+    ymin = -Inf,
+    ymax = Inf,
+    bg = source
+  )
+
+ggplot(combined_df, aes(x = source, y = logFDR, color = category)) +
+  geom_rect(
+    data = bg_df,
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = bg),
+    inherit.aes = FALSE,
+    alpha = 0.3
+  ) +
+  geom_jitter(width = 0.25, size = 2, alpha = 0.9) +
+  scale_color_manual(values = c(
+    "Up" = "#A90C38",
+    "Down" = "#2E5A87",
+    "Not significant" = "black"
+  )) +
+  scale_fill_brewer(palette = "Set3", guide = "none") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    title = "Manhattan Plot of Functional Enrichment",
+    x = "Annotation database",
+    y = "-log10(FDR)",
+    color = "Category"
+  )
+```
+  
+**Figure 5**. g: Profiler Functional Enrichment Manhattan Plot. This plot shows the results of over-representation analysis (ORA) based on differentially expressed genes. The horizontal axis represents different functional annotation databases, including CORUM, GO Biological Process, GO Cellular Component, GO Molecular Function, KEGG, and Reactome; the vertical axis is −log10 (FDR), representing enrichment significance. Each point represents an enriched pathway. Red dots indicate enriched pathways driven by upregulated genes, and blue dots indicate enriched pathways driven by downregulated genes. The dashed line represents the significance threshold (FDR = 0.05). This plot is used to provide an overall view of the distribution of significantly enriched pathways across different functional databases and helps identify important biological processes that recur in multiple databases.  
+
+### Interpretation
+We can see that downregulated genes are significantly enriched in BP, CORUM, and CORUM, while upregulated genes are significantly enriched in BP, CC, and MF. Stenvers' paper mentions that classical metabolic pathways related to lipolysis regulation have lost their diurnal rhythm, and the activity of the translation initiation-related pathway "EIF2 signaling" is reduced [@GSE104674]. This corresponds to the large number of downregulated genes we see in the Biology process, which is likely related to the EIF2 pathway. Meanwhile, Yu's paper, in its differential expression analysis in diabetes, also found upregulated genes enriched in enzyme activity, binding activity, and mitochondrial components, corresponding to the CC and MF classes in my results [@Yu2025]. Gabrie's study shows Type II diabetes will effect mitochonfrial metabolism in skeletal muscle [@Gabriel2021]. This demonstrates that diabetes may affects pathways such as mitochondrial composition and energy metabolism.  
+
+## GSEA  
+### Get Reference
+```{r}
+tryCatch(expr = { library("RCurl")}, 
+         error = function(e) {  
+           install.packages("RCurl")}, 
+         finally = library("RCurl"))
+
+# GSEA jar
+gsea_jar <- params$gsea_jar
+working_dir <- params$working_dir
+output_dir <- params$output_dir
+analysis_name <- params$analysis_name
+rnk_file <- params$rnk_file
+run_gsea <- params$run_gsea
+
+dest_gmt_file <- ""
+if(dest_gmt_file == ""){
+  gmt_url = "https://download.baderlab.org/EM_Genesets/September_01_2025/Human/symbol/"
+  
+  filenames = getURL(gmt_url)
+  tc = textConnection(filenames)
+  contents = readLines(tc)
+  close(tc)
+  
+  rx = gregexpr("(?<=<a href=\")(.*.GOBP_AllPathways_noPFOCR_no_GO_iea.*.)(.gmt)(?=\">)",
+    contents, perl = TRUE)
+  gmt_file = unlist(regmatches(contents, rx))
+  
+  dest_gmt_file <- file.path(output_dir,gmt_file )
+  
+  if(!file.exists(dest_gmt_file)){
+    download.file(
+      paste(gmt_url,gmt_file,sep=""),
+      destfile=dest_gmt_file
+    )
+  }
+}
+```
+### Run analysis
+```{r, results='hide'}
+
+rank_df <- data.frame(
+  gene = names(gene_rank_vector),
+  score = gene_rank_vector
+)
+
+write.table(
+  rank_df,
+  file = file.path(working_dir, rnk_file),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+command <- paste(
+  gsea_jar,
+  "GSEAPreRanked",
+  "-gmx", dest_gmt_file,
+  "-rnk", file.path(working_dir, rnk_file),
+  "-collapse false",
+  "-nperm 1000",
+  "-scoring_scheme weighted",
+  "-rpt_label", analysis_name,
+  "-plot_top_x 20",
+  "-rnd_seed 12345",
+  "-set_max 200",
+  "-set_min 15",
+  "-zip_report false",
+  "-out", output_dir
+)
+
+system(command)
+
+```
+
+## Results
+```{r}
+
+pos_file <- list.files(
+  output_dir,
+  pattern = "gsea_report_for_na_pos.*\\.tsv$",
+  full.names = TRUE,
+  recursive = TRUE
+)
+
+neg_file <- list.files(
+  output_dir,
+  pattern = "gsea_report_for_na_neg.*\\.tsv$",
+  full.names = TRUE,
+  recursive = TRUE
+)
+
+gsea_up <- read_tsv(pos_file[1])
+gsea_down <- read_tsv(neg_file[1])
+
+gsea_up$direction <- "Up"
+gsea_down$direction <- "Down"
+
+gsea_res <- bind_rows(gsea_up, gsea_down)
+
+gsea_sig <- gsea_res |>
+  filter(`FDR q-val` < 0.05) |>
+  mutate(
+    Pathway = str_replace(NAME, "%.*", "")
+  )
+
+top_up <- gsea_sig |>
+  filter(direction == "Up") |>
+  arrange(desc(NES)) |>
+  slice_head(n = 10) |>
+  pull(Pathway)
+
+top_down <- gsea_sig |>
+  filter(direction == "Down") |>
+  arrange(NES) |>
+  slice_head(n = 10) |>
+  pull(Pathway)
+
+table_df <- tibble(
+  Down = top_down,
+  Up = top_up
+)
+
+table_df |>
+  kable(
+    caption = "Top Enriched Pathways from GSEA",
+    col.names = c("Downregulated pathways", "Upregulated pathways"),
+    booktabs = TRUE
+  ) |>
+  kable_styling(full_width = FALSE) |>
+  column_spec(1, width = "6cm") |>
+  column_spec(2, width = "6cm")
+```  
+
+### Interpretations 
+
+
+## Cytoscape
+
+### Generate network
+First, the GSEA results were visualized using the Cytoscape EnrichmentMap plugin. Input files included the GSEA-generated `gsea_report_for_na_pos` and `gsea_report_for_na_neg` result files, and the gene set database `.gmt` file used for analysis. The main thresholds used in network construction were: FDR q-value < 0.05, p-value < 0.01, gene set similarity using the overlap coefficient, and a similarity cutoff of 0.375. An enrichment network was generated based on these parameters, where each node represents an enriched pathway, and edges between nodes indicate shared genes between two pathways.  
+```{r}
+knitr::include_graphics("A2/plot/raw.png")
+```
+  
+**Figure 6**. GSEA Enrichment Pathway Network (Original EnrichmentMap). This figure shows the enrichment pathway network constructed in Cytoscape based on GSEA (Gene Set Enrichment Analysis) results. Each node represents a significantly enriched pathway, and the lines between nodes indicate shared genes between two pathways. Node color indicates the direction of pathway enrichment (upregulation or downregulation), and node size is related to the enrichment intensity. This figure shows the original network structure before layout adjustments and clustering. Due to the large number of enriched pathways, the network is relatively dense, and many pathways form complex connections through shared genes.  
+
+I set the FDR threshold to 0.005 and the similarity cutoff to 0.5. I selected the more prominent nodes and edges to display. I hid the labels of individual nodes, only showing the labels of clusters, and distinguished them by different colors. Finally, I reformatted the layout, generating the following image.  
+```{r}
+knitr::include_graphics("A2/plot/clustered.png")
+```
+  
+**Figure 7**. GSEA Enrichment Pathway Theme Network (Enrichment Map after AutoAnnotate Clustering). This figure shows the results of clustering and topic labeling the enriched pathway network using the AutoAnnotate plugin in Cytoscape. Pathways with similar gene overlap were automatically grouped into clusters, and topic labels were generated based on keywords in the pathway names. Each cluster represents a group of pathways with similar biological functions, such as protein synthesis, respiratory electron transport, fatty acid oxidation, lipid metabolism regulation, and immune-related processes (such as neutrophil migration). This network structure can integrate a large number of individual enriched pathways into several main functional modules, making it easier to identify important biological processes that undergo synergistic changes in the data.
+
+## Discussion  
+This study systematically analyzed the functions of differentially expressed genes using g:Profiler, GSEA, and Cytoscape network analysis. The results from the three methods were generally consistent, indicating that multiple metabolic pathways are significantly altered in type 2 diabetes.
+
+First, in g:Profiler analysis, downregulated genes were mainly enriched in Biological Process (BP) and CORUM complex-related pathways, while upregulated genes were more enriched in Cellular Component (CC) and Molecular Function (MF) categories. GSEA analysis further showed that downregulated pathways were mainly concentrated in protein synthesis and translation-related processes, such as multiple protein synthesis pathways and eukaryotic translation elongation. This is consistent with previous research. Studies have shown that in adipose tissue of patients with type 2 diabetes, the activity of translation-related pathways (such as EIF2 signaling) is reduced, thereby affecting protein synthesis and metabolic regulation [@Stenvers2019].
+
+Second, in the Cytoscape EnrichmentMap network, lipid metabolism-related pathways formed distinct modules, such as "coa acyl process" and "lipid modification oxidation." Abnormal lipid metabolism is a key characteristic of type 2 diabetes. Studies have shown that in a state of insulin resistance, the expression of genes related to fatty acid metabolism and lipid oxidation is altered, thereby affecting energy metabolism and insulin signaling pathways [@Soronen2012; @Samuel2016].
+
+Furthermore, immune-related pathways, such as the neutrophil migration chemotaxis, are also present in the network. Recent studies have found that type 2 diabetes is often accompanied by a chronic low-grade inflammatory response, and immune cell infiltration and activation of inflammatory signaling pathways in adipose tissue promote the development of insulin resistance [@Hotamisligil2017].
+
+Overall, the enrichment analysis results of this study indicate that protein translation is suppressed in type 2 diabetes-related adipose tissue, while lipid metabolism and immune-inflammatory pathways are activated. These changes collectively reflect metabolic disorders and inflammatory responses in diabetes.
