@@ -19,6 +19,8 @@ params:
   fdr_thresh: 0.01
   pval_thresh: 1
   java_version: 11
+bibliography: references.bib
+link-citations: true
 ---
 
 ```{r setup, message=FALSE, warning=FALSE}
@@ -31,14 +33,18 @@ library(knitr)
 library(kableExtra)
 library(RCurl)
 ```
+# Dataset and Preprocessing Summary
+The data used in this study came from the RNA-seq dataset GSE104674 in the Gene Expression Omnibus (GEO) database [@GSE104674]. This dataset contains transcriptome data from subcutaneous adipose tissue and was designed to investigate gene expression differences between patients with type 2 diabetes and healthy controls. The raw dataset contains 48 samples obtained from 12 subjects, with four samples collected from each subject at different time points across the circadian cycle. The experimental group consists of obese individuals with type 2 diabetes, while the control group consists of healthy lean individuals.
 
-# Introduction
+In Assignment A1, the raw RNA-seq data were processed through several data cleaning and preprocessing steps. Raw count data were downloaded from GEO and combined with phenotype information to construct the sample grouping variable (control vs diabetes). Low-expression genes were filtered using the filterByExpr function from the edgeR package [@Robinson2010]. This filtering step removed 9029 genes with insufficient expression support across samples, reducing statistical noise and improving the reliability of downstream differential expression analysis.
 
-The dataset analyzed in this report was obtained from the Gene Expression Omnibus (GEO) under accession GSE104674. The study contains RNA sequencing data from subcutaneous adipose tissue samples collected from individuals with type 2 diabetes and healthy controls.
+The gene identifiers in the raw counts file were provided in the format gene_symbol:transcript_id. Because the analysis focused on gene-level expression rather than transcript-level expression, transcripts belonging to the same gene were merged by summing counts. Gene names were then validated using the biomaRt database [@Durinck2009] to confirm official HUGO gene symbols. Alias mapping was applied to recover gene symbols that appeared under alternative names, and genes that could not be mapped to official symbols were removed. After these steps, the final expression matrix contained 15,335 genes across 48 samples.
 
-In Assignment 1, raw count data were processed and normalized using the DESeq2 size factor normalization method. Gene identifiers were standardized and low expression genes were filtered. Exploratory analysis including density plots, boxplots, and MDS plots suggested that normalization corrected library size differences and revealed partial separation between the diabetes and control groups.
+To correct for sequencing depth differences between samples, normalization was performed using the DESeq2 size factor normalization method [@Love2014]. The distribution of expression values was evaluated using density plots, boxplots, and multidimensional scaling (MDS) plots. These quality control plots showed that there were no major outliers among samples, and that normalization improved the comparability of expression distributions across samples. The MDS plot also showed a partial separation between diabetes and control samples, suggesting systematic transcriptional differences between the two groups.
 
-This assignment focuses on identifying differentially expressed genes and performing functional enrichment analysis to identify biological processes associated with the observed transcriptional changes.
+Differential expression analysis in Assignment A1 was performed using the DESeq2 negative binomial model [@Love2014]. P-values were calculated using the Wald test and corrected for multiple hypothesis testing using the Benjamini–Hochberg false discovery rate procedure. Using adjusted p-value < 0.01 and |log2FoldChange| > 1 as significance thresholds, a total of 203 significantly differentially expressed genes were identified, including 92 upregulated genes and 111 downregulated genes. These differentially expressed genes were subsequently used as the input for functional enrichment analyses in Assignment 2, including over-representation analysis with g:Profiler and gene set enrichment analysis (GSEA).
+
+This assignment focuses on identifying differentially expressed genes and performing functional enrichment analysis to identify biological processes associated with the observed transcriptional changes. We import the final data from Assignemnt 1.  
 ```{r}
 load("A1_objects.RData")
 ```
@@ -55,7 +61,7 @@ design(dds)
 
 The model tests whether gene expression differs between the diabetes and control groups.
 
-## Differential Expression Testing
+## Differential Expression Testing {#def-res}
 
 ```{r}
 res <- results(dds)
@@ -70,7 +76,7 @@ Genes were considered significantly differentially expressed using the following
 * adjusted p-value < 0.01
 * absolute log2 fold change > 1
 
-Adjusted p-values were calculated using the Benjamini–Hochberg false discovery rate correction.
+Adjusted p-values were calculated using the Benjamini–Hochberg false discovery rate correction. 111 Down regulated and 92 Up regulated genes are selected.
 
 ```{r}
 res_df <- res_df |>
@@ -84,8 +90,6 @@ res_df <- res_df |>
 
 table(res_df$sig)
 ```
-
-# Visualization
 
 ## Volcano Plot
 
@@ -178,9 +182,10 @@ ggplot(ranked_genes, aes(log2FoldChange)) +
 
 **Figure 4**. Distribution of ranked differential expression. This figure shows the distribution of log2 Fold Change for all genes. The horizontal axis represents log2 Fold Change, and the vertical axis represents the number of genes. This distribution is used to observe the overall trend of differential expression changes and serves as the basis for constructing the gene ranking list in GSEA analysis. It can be seen that the expression changes of most genes are concentrated around 0, indicating relatively small overall expression changes, while only a few genes show large expression changes.  
 
-## G:profiler  
-### Run Analysis
-We have obtained three gene sets based on the DESeq2 results: upregulated genes, downregulated genes, and all differentially expressed genes. Next, we will use g:Profiler to perform over-representation analysis on these gene sets to identify significantly enriched biological processes and pathways. First, we will perform enrichment analysis on upregulated and downregulated genes separately. g:Profiler will calculate significance based on the frequency of the input gene set in each functional category using a hypergeometric test and perform multiple validation correction.  
+# G:profiler  
+## Run Analysis
+We have obtained three gene sets based on the DESeq2 results: upregulated genes, downregulated genes, and all differentially expressed genes. Next, we will use g:Profiler to perform over-representation analysis on these gene sets to identify significantly enriched biological processes and pathways. The input gene were got from Defferential Expression Test (see [result](#def-res)), 111 Down gene and 92 Up gene were used in analysis. The annotation database used included Gene Ontology (Biological Process, Cellular Component, Molecular Function), KEGG, Reactome and CORUM pathways.  
+The analysis was performed for Homo sapiens (hsapiens) using the current annotation release provided by g:Profiler at the time of analysis [@Raudvere2019]. First, we will perform enrichment analysis on upregulated and downregulated genes separately. g:Profiler will calculate significance based on the frequency of the input gene set in each functional category using a hypergeometric test and perform multiple validation correction. 
 ```{r}
 res_df <- res_df |>
   mutate(
@@ -222,7 +227,7 @@ gost_all <- gost(
 )
 ```  
 
-### Results
+## Results
 From the G:profiler results, we used a corrected FDR of less than 0.05 as a threshold to filter statistically significant functional categories. We then examined how many significantly enriched functional categories were returned in each analysis.
 
 ```{r}
@@ -242,15 +247,17 @@ combined_df <- bind_rows(up_df, down_df)
 table_df <- combined_df |>
   mutate(logFDR = -log10(p_value)) |>
   filter(p_value < 0.05) |>
+  group_by(direction) |>
   arrange(p_value) |>
+  slice_head(n = 5) |>
+  ungroup() |>
   dplyr::select(
     Database = source,
     Term = term_name,
     log10FDR = logFDR,
     GeneCount = intersection_size,
     Direction = direction
-  ) |>
-  slice(1:30)
+  )
 
 knitr::kable(table_df, digits = 3) |>
   kable_styling(
@@ -258,8 +265,11 @@ knitr::kable(table_df, digits = 3) |>
     bootstrap_options = c("striped", "hover")
   )
 ```
- 
-### Manhattan Plot 
+  
+**Table 1**. Results of g:Profiler functional enrichment analysis of differentially expressed genes. The top 5 categories with the highest enrichment significance for both UP and Down were selected. Database indicates the source of the functional annotation database (e.g., different classifications of GO); Term indicates the specific biological function or pathway name enriched; log10FDR is the −log10(FDR) value of enrichment significance, with a larger value indicating higher significance; GeneCount indicates the number of genes in the input gene set that fall into this functional pathway; Direction indicates the gene direction from which the enrichment originates, where Up indicates upregulated gene enrichment and Down indicates downregulated gene enrichment.
+
+
+## Manhattan Plot 
 G:profiler includes a Manhattan plot. The Manhattan plot allows us to see details of gene enrichment in significant functional categories.  
 
 ```{r}
@@ -315,11 +325,15 @@ ggplot(combined_df, aes(x = source, y = logFDR, color = category)) +
   
 **Figure 5**. g: Profiler Functional Enrichment Manhattan Plot. This plot shows the results of over-representation analysis (ORA) based on differentially expressed genes. The horizontal axis represents different functional annotation databases, including CORUM, GO Biological Process, GO Cellular Component, GO Molecular Function, KEGG, and Reactome; the vertical axis is −log10 (FDR), representing enrichment significance. Each point represents an enriched pathway. Red dots indicate enriched pathways driven by upregulated genes, and blue dots indicate enriched pathways driven by downregulated genes. The dashed line represents the significance threshold (FDR = 0.05). This plot is used to provide an overall view of the distribution of significantly enriched pathways across different functional databases and helps identify important biological processes that recur in multiple databases.  
 
-### Interpretation
+## Interpretation
 We can see that downregulated genes are significantly enriched in BP, CORUM, and CORUM, while upregulated genes are significantly enriched in BP, CC, and MF. Stenvers' paper mentions that classical metabolic pathways related to lipolysis regulation have lost their diurnal rhythm, and the activity of the translation initiation-related pathway "EIF2 signaling" is reduced [@GSE104674]. This corresponds to the large number of downregulated genes we see in the Biology process, which is likely related to the EIF2 pathway. Meanwhile, Yu's paper, in its differential expression analysis in diabetes, also found upregulated genes enriched in enzyme activity, binding activity, and mitochondrial components, corresponding to the CC and MF classes in my results [@Yu2025]. Gabrie's study shows Type II diabetes will effect mitochonfrial metabolism in skeletal muscle [@Gabriel2021]. This demonstrates that diabetes may affects pathways such as mitochondrial composition and energy metabolism.  
 
-## GSEA  
-### Get Reference
+# GSEA  
+Gene set enrichment analysis (GSEA) was performed using the GSEA Preranked algorithm implemented in the Broad Institute GSEA software (version 4.4.0) [@Subramanian2005]. In this approach, genes were ranked according to the log2 fold change obtained from the DESeq2 differential expression analysis, and enrichment was evaluated using a weighted Kolmogorov–Smirnov–like statistic. The analysis was run with 1000 permutations and gene set sizes between 15 and 200.
+
+For pathway annotation, gene sets were obtained from the Bader Lab gene set collection, specifically the file *GOBP_AllPathways_noPFOCR_no_GO_iea*, which integrates Gene Ontology Biological Process, Reactome, and other curated pathway databases. The annotation file was downloaded from the Bader Lab repository (September 2025 release) and uses human gene symbols as identifiers.
+  
+## Get Reference
 ```{r}
 tryCatch(expr = { library("RCurl")}, 
          error = function(e) {  
@@ -357,7 +371,7 @@ if(dest_gmt_file == ""){
   }
 }
 ```
-### Run analysis
+## Run analysis
 ```{r, results='hide'}
 
 rank_df <- data.frame(
@@ -453,12 +467,13 @@ table_df |>
   column_spec(2, width = "6cm")
 ```  
 
-### Interpretations 
+**Table 2.** Significantly enriched pathways obtained from GSEA analysis, selecting the top 10 downregulated and upregulated pathways. The left column shows pathways with significantly downregulated genes, and the right column shows pathways with significantly upregulated genes. Each row displays the name of the functional pathway significantly enriched in the ranking analysis. Downregulated pathways are mainly concentrated in protein synthesis and translation-related processes, while upregulated pathways mainly involve biological processes such as extracellular matrix organization, immune responses, and cell-cell interactions.  
 
+## Interpretations  
+The GSEA results are generally consistent with previous g:Profiler enrichment analyses. g:Profiler analysis showed that downregulated genes were mainly enriched in Biological Process (BP) and CORUM complex-related pathways, while upregulated genes were more enriched in the BP, Cellular Component (CC), and Molecular Function (MF) categories, indicating that in diabetic states, genes in different functional modules exhibit regulatory changes in different directions. In the GSEA analysis, downregulated pathways were mainly related to protein synthesis and translation processes, such as protein synthesis pathways related to various amino acids and eukaryotic translation elongation. This result is consistent with the enrichment of downregulated genes in the BP category in g:Profiler. Previous studies have shown that circadian rhythm-regulated metabolic pathways are disrupted in the adipose tissue of patients with type 2 diabetes, while the activity of translation-related pathways (such as EIF2 signaling) is decreased, thereby affecting protein synthesis and metabolic regulation [@GSE104674]. In contrast, the upregulated pathways in GSEA are mainly involved in immune responses and intercellular interactions, such as antigen processing and presentation. This result also corresponds to the enrichment of upregulated genes in the CC and MF categories in g:Profiler. Previous studies have found that in transcriptomic analysis of diabetes, upregulated genes are often enriched in enzyme activity, molecular binding, and mitochondrial-related functional categories [@Yu2025]. Furthermore, studies have shown that type 2 diabetes affects mitochondrial energy metabolism in metabolic tissues [@Gabriel2021].   
+# Cytoscape
 
-## Cytoscape
-
-### Generate network
+## Generate network
 First, the GSEA results were visualized using the Cytoscape EnrichmentMap plugin. Input files included the GSEA-generated `gsea_report_for_na_pos` and `gsea_report_for_na_neg` result files, and the gene set database `.gmt` file used for analysis. The main thresholds used in network construction were: FDR q-value < 0.05, p-value < 0.01, gene set similarity using the overlap coefficient, and a similarity cutoff of 0.375. An enrichment network was generated based on these parameters, where each node represents an enriched pathway, and edges between nodes indicate shared genes between two pathways.  
 ```{r}
 knitr::include_graphics("A2/plot/raw.png")
@@ -473,7 +488,7 @@ knitr::include_graphics("A2/plot/clustered.png")
   
 **Figure 7**. GSEA Enrichment Pathway Theme Network (Enrichment Map after AutoAnnotate Clustering). This figure shows the results of clustering and topic labeling the enriched pathway network using the AutoAnnotate plugin in Cytoscape. Pathways with similar gene overlap were automatically grouped into clusters, and topic labels were generated based on keywords in the pathway names. Each cluster represents a group of pathways with similar biological functions, such as protein synthesis, respiratory electron transport, fatty acid oxidation, lipid metabolism regulation, and immune-related processes (such as neutrophil migration). This network structure can integrate a large number of individual enriched pathways into several main functional modules, making it easier to identify important biological processes that undergo synergistic changes in the data.
 
-## Discussion  
+# Discussion  
 This study systematically analyzed the functions of differentially expressed genes using g:Profiler, GSEA, and Cytoscape network analysis. The results from the three methods were generally consistent, indicating that multiple metabolic pathways are significantly altered in type 2 diabetes.
 
 First, in g:Profiler analysis, downregulated genes were mainly enriched in Biological Process (BP) and CORUM complex-related pathways, while upregulated genes were more enriched in Cellular Component (CC) and Molecular Function (MF) categories. GSEA analysis further showed that downregulated pathways were mainly concentrated in protein synthesis and translation-related processes, such as multiple protein synthesis pathways and eukaryotic translation elongation. This is consistent with previous research. Studies have shown that in adipose tissue of patients with type 2 diabetes, the activity of translation-related pathways (such as EIF2 signaling) is reduced, thereby affecting protein synthesis and metabolic regulation [@Stenvers2019].
@@ -483,3 +498,5 @@ Second, in the Cytoscape EnrichmentMap network, lipid metabolism-related pathway
 Furthermore, immune-related pathways, such as the neutrophil migration chemotaxis, are also present in the network. Recent studies have found that type 2 diabetes is often accompanied by a chronic low-grade inflammatory response, and immune cell infiltration and activation of inflammatory signaling pathways in adipose tissue promote the development of insulin resistance [@Hotamisligil2017].
 
 Overall, the enrichment analysis results of this study indicate that protein translation is suppressed in type 2 diabetes-related adipose tissue, while lipid metabolism and immune-inflammatory pathways are activated. These changes collectively reflect metabolic disorders and inflammatory responses in diabetes.
+
+# Reference
