@@ -10,3 +10,8 @@ Link to A1 HTML - https://github.com/bcb420-2026/Xiaofeng_Li/blob/main/A1_Xiaofe
 Link to A2 wiki - https://github.com/bcb420-2026/Xiaofeng_Li/wiki/Assignment-2  
 
 Link to A2 HTML - https://github.com/bcb420-2026/Xiaofeng_Li/blob/main/A2_Xiaofeng_Li.html
+
+# A3
+Link to A3 wiki - https://github.com/bcb420-2026/Xiaofeng_Li/wiki/Assignment-3  
+
+Link to A3 pdf - https://github.com/bcb420-2026/Xiaofeng_Li/blob/main/A3_Xiaofeng_Li.pdf
